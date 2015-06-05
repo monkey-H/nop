@@ -59,24 +59,27 @@ if [ ! -f $APPDIR/$APP/Dockerfile ]; then
 		sudo chmod o+w $APPDIR/$APP/Dockerfile
 		sudo touch $APPDIR/$APP/run
 		sudo chmod o+w $APPDIR/$APP/run
+
 #look for memory limit and others
-		MEMORY=$(grep memory: $APPDIR/$APP/profile | head -1 | awk '{ print $2 }')
-		if [ -z "$MEMORY" ]; then
-			echo "no memory limit"
-		else
-			DOCKER_MEMORY="-m $MEMORY"
-		fi
+#read settings and command in profile
+		while read line; do
+			key=$(echo $line | cut -f 1 -d ' ')
+			str=""
+			value=$(echo ${line/$key/$str})
+			case $key in
+				memory:)
+					MEMORY=$(echo $line | awk '{ print $2 }')
+					DOCKER_MEMORY="-m $MEMORY"
+				;;
+				command:)
+					echo $value >> $APPDIR/$APP/run
+				;;
+				*)
+					echo "other settings"
+			esac
+		done < $APPDIR/$APP/profile
 
-#get out the entrypoint command
-		line=$(grep command: $APPDIR/$APP/profile | head -1)
-		null=""
-		COMMAND="${line/command:/$null}"
-		if [ -z "$COMMAND" ]; then
-			echo "must be command in profile"
-		else
-			echo $COMMAND >> $APPDIR/$APP/run
-		fi
-
+#dockerfile for app
 		cat > $APPDIR/$APP/Dockerfile <<EOF
 FROM docker.iwanna.xyz:5000/hmonkey/maven
 MAINTAINER hmonkey <5681713@qq.com>
