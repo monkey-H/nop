@@ -1,0 +1,48 @@
+#!/bin/bash
+set -x
+
+GITDIR=/home/nop/gits
+APPDIR=/home/nop/apps
+WORKDIR=/etc/systemd/system
+APP=$1
+
+touch $APPDIR/$APP/Dockerfile
+sudo chmod o+w $APPDIR/$APP/Dockerfile
+touch $APPDIR/$APP/run
+sudo chmod o+w $APPDIR/$APP/run
+
+#look for memory limit and others
+#read settings and command in profile
+while read line; do
+	key=$(echo $line | cut -f 1 -d ' ')
+	str=""
+	value=$(echo ${line/$key/$str})
+	case $key in
+		memory:)
+			MEMORY=$(echo $line | awk '{ print $2 }')
+			DOCKER_OPTS="-m $MEMORY"
+		;;
+		scale:)
+			INSTANCES=$(echo $line | awk '{ print $2 }')
+		;;
+		command:)
+			echo $value > $APPDIR/$APP/run
+		;;
+		*)
+			echo "other settings"
+	esac
+done < $APPDIR/$APP/profile
+
+#dockerfile for app
+
+cat > $APPDIR/$APP/Dockerfile <<EOF
+FROM docker.iwanna.xyz:5000/hmonkey/maven
+MAINTAINER hmonkey <5681713@qq.com>
+
+COPY run /app/run
+COPY data /app/data
+WORKDIR /app
+ENTRYPOINT ["sh", "run"]
+EOF
+
+/home/nop/nop/dockerfile_treat $APP $INSTANCES "${DOCKER_OPTS}"

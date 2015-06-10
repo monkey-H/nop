@@ -1,0 +1,233 @@
+#!/bin/bash
+set -x
+args=$*
+APP="$(echo $2 | sed "s/'//g")"
+
+#apps in /home/iwanna/apps and git repository in /home/iwanna/gits
+[ -d /home/iwanna/gits ] || (mkdir /home/iwanna/gits)
+[ -d /home/iwanna/apps ] || (mkdir /home/iwanna/apps)
+GITDIR=/home/iwanna/gits
+APPDIR=/home/iwanna/apps
+
+#judge if app git exist, if not git init or nothing
+[ -d $GITDIR/$APP ] || (mkdir $GITDIR/$APP && git init --bare $GITDIR/$APP > /dev/null)
+
+git-shell -c "$1 'gits/$APP'"
+
+#judge if app exist, if not clone, or how?
+if [ -d $APPDIR/$APP ]; then
+	cd $APPDIR/$APP
+	update_new=$(git pull)
+	cd  
+	if [ "$update_new" = "Already up-to-date." ]; then
+		if [ "$(etcdctl get /services/coreos1/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos1/$APP)
+			exit 0
+		elif [ "$(etcdctl get /services/coreos2/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos2/$APP)
+                        exit 0
+		elif [ "$(etcdctl get /services/coreos3/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos3/$APP)
+                        exit 0
+		else
+			sudo rm -r $APPDIR/$APP
+			mkdir $APPDIR/$APP
+			git clone $GITDIR/$APP $APPDIR/$APP
+		fi
+	else
+		sudo rm -r $APPDIR/$APP
+		mkdir $ADDDIR/$APP
+		git clone $GITDIR/$APP $APPDIR/$APP
+	fi
+else
+	mkdir $APPDIR/$APP
+	git clone $GITDIR/$APP $APPDIR/$APP
+fi
+
+WORKDIR=/etc/systemd/system
+RIGISTRY="docker.iwanna.xyz:5000/hmonkey"
+INSTANCES=1
+
+#build unit, destroy app and app_discovery, then build image and push it
+
+sudo touch $WORKDIR/BUILD_${APP}.service
+BUILD_SERVICE="$WORKDIR/BUILD_${APP}.service"
+sudo chmod o+w $BUILD_SERVICE
+
+if [ ! -f $APPDIR/$APP/Dockerfile ]; then
+	if [ -f $APPDIR/$APP/pom.xml ]; then
+		touch $APPDIR/$APP/Dockerfile
+		sudo chmod o+w $APPDIR/$APP/Dockerfile
+		touch $APPDIR/$APP/run
+		sudo chmod o+w $APPDIR/$APP/run
+
+#look for memory limit and others
+#read settings and command in profile
+		while read line; do
+			key=$(echo $line | cut -f 1 -d ' ')
+			str=""
+			value=$(echo ${line/$key/$str})
+			case $key in
+				memory:)
+					MEMORY=$(echo $line | awk '{ print $2 }')
+					DOCKER_MEMORY="-m $MEMORY"
+				;;
+				scale:)
+					INSTANCES=$(echo $line | awk '{ print $2 }')
+				;;
+				command:)
+					echo $value >> $APPDIR/$APP/run
+				;;
+				*)
+					echo "other settings"
+			esac
+		done < $APPDIR/$APP/profile
+
+#dockerfile for app
+		cat > $APPDIR/$APP/Dockerfile <<EOF
+FROM docker.iwanna.xyz:5000/hmonkey/maven
+MAINTAINER hmonkey <5681713@qq.com>
+
+COPY pom.xml /app/pom.xml
+COPY src /app/src
+COPY run /app/run
+COPY data /app/data
+WORKDIR /app
+RUN mvn package
+ENTRYPOINT ["sh", "run"]
+EOF
+	else 
+                touch $APPDIR/$APP/Dockerfile
+                sudo chmod o+w $APPDIR/$APP/Dockerfile
+		while read line; do
+                        key=$(echo $line | cut -f 1 -d ' ')
+                        str=""
+                        value=$(echo ${line/$key/$str})
+                        case $key in
+                                memory:)
+                                        MEMORY=$(echo $line | awk '{ print $2 }')
+                                        DOCKER_MEMORY="-m $MEMORY"
+                                ;;
+                                scale:)
+                                        INSTANCES=$(echo $line | awk '{ print $2 }')
+                                ;;
+                                command:)
+                                        echo $value >> $APPDIR/$APP/run
+                                ;;
+                                *)
+                                        echo "other settings"
+                        esac
+                done < $APPDIR/$APP/profile
+               
+		cat > $APPDIR/$APP/Dockerfile <<EOF
+FROM docker.iwanna.xyz:5000/hmonkey/maven
+MAINTAINER hmonkey <5681713@qq.com>
+
+COPY run /app/run
+COPY data /app/data
+WORKDIR /app
+ENTRYPOINT ["sh", "run"]
+EOF
+	fi
+fi
+
+
+cat > $BUILD_SERVICE <<EOF
+[Unit]
+Description=${APP}_build
+Requires=docker.service
+After=docker.service
+
+[Service]
+TimeoutStartSec=900m
+ExecStartPre=/usr/bin/docker build -t $RIGISTRY/${APP}_image $APPDIR/$APP
+ExecStart=/usr/bin/docker push $RIGISTRY/${APP}_image
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+#run unit, pull image and run it
+
+sudo touch $WORKDIR/${APP}@.service
+SERVICE="$WORKDIR/${APP}@.service"
+sudo chmod o+w $SERVICE
+cat > $SERVICE <<EOF
+[Unit]
+Description=${APP}
+Requires=docker.service
+After=docker.service
+
+[Service]
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker stop ${APP}%i
+ExecStartPre=-/usr/bin/docker rm $APP%i
+ExecStartPre=-/usr/bin/docker pull $RIGISTRY/${APP}_image
+ExecStart=/usr/bin/docker run -P $DOCKER_MEMORY --name $APP%i $RIGISTRY/${APP}_image
+ExecStop=/usr/bin/docker stop $APP%i
+ExecStopPost=-/usr/bin/docker rm $APP%i
+
+[X-Fleet]
+MachineID=bbfd7a408f8e4799ad2f2b473250317c
+
+EOF
+
+#discovery unit, by machineof find the run unit, and write ip and port to etcd
+
+sudo touch $WORKDIR/${APP}_discovery@.service
+DISCOVERY="$WORKDIR/${APP}_discovery@.service"
+sudo chmod o+w $DISCOVERY
+cat > $DISCOVERY <<EOF
+[Unit]
+Description=${APP}_discovery
+BindsTo=${APP}@%i.service
+After=${APP}@%i.service
+
+[Service]
+ExecStart=/bin/sh -c "while true; do appport=\$(docker inspect --format='{{range \$p, \$conf := .NetworkSettings.Ports}}{{(index \$conf 0).HostPort}}{{end}}' $APP); etcdctl set /services/\"%H\"/$APP '{\"host\": \"%H\", \"port\": '\$appport'}' --ttl 60; sleep 30; done"
+ExecStop=/usr/bin/etcdctl rm /services/"%H"/$APP
+
+[X-Fleet]
+MachineOf=${APP}@%i.service
+EOF
+
+#buid and push
+
+sudo systemctl enable $BUILD_SERVICE
+sudo systemctl daemon-reload
+sudo systemctl start BUILD_${APP}.service
+
+#start app unit and discovery unit
+
+fleetctl destroy ${APP}@.service
+fleetctl destroy ${APP}_discovery@.service
+
+fleetctl submit $WORKDIR/${APP}@.service $WORKDIR/${APP}_discovery@.service
+
+# start instances of scales
+for ((i=1; i<=$INSTANCES; ++i))
+do
+	fleetctl destroy $WORKDIR/${APP}@$i.service > /dev/null
+	fleetctl destroy $WORKDIR/${APP}_discovery@$i.service > /dev/null
+	fleetctl start $WORKDIR/${APP}@$i.service > /dev/null
+	fleetctl start $WORKDIR/${APP}_discovery@$i.service > /dev/null
+done
+
+
+#wait 45 sec for writing to etcd finished
+
+sleep 45
+
+if [ "$(etcdctl get /services/coreos1/$APP)" ]; then
+	ipport_etcd=$(etcdctl get /services/coreos1/$APP)
+        exit 0
+elif [ "$(etcdctl get /services/coreos2/$APP)" ]; then
+        ipport_etcd=$(etcdctl get /services/coreos2/$APP)
+        exit 0
+elif [ "$(etcdctl get /services/coreos3/$APP)" ]; then
+        ipport_etcd=$(etcdctl get /services/coreos3/$APP)
+        exit 0
+else
+	echo "no ip and port" 
+fi
+

@@ -1,0 +1,73 @@
+#!/bin/bash
+set -x
+args=$*
+APP="$(echo $2 | sed "s/'//g")"
+
+#apps in /home/nop/apps and git repository in /home/nop/gits
+[ -d /home/nop/gits ] || (mkdir /home/nop/gits)
+[ -d /home/nop/apps ] || (mkdir /home/nop/apps)
+GITDIR=/home/nop/gits
+APPDIR=/home/nop/apps
+
+WORKDIR=/etc/systemd/system
+NOPDIR=/home/nop/nop
+INSTANCES=1
+
+sudo touch $WORKDIR/BUILD_${APP}.service
+BUILD_SERVICE="$WORKDIR/BUILD_${APP}.service"
+sudo chmod o+w $BUILD_SERVICE
+
+
+#judge if app git exist, if not git init or nothing
+[ -d $GITDIR/$APP ] || (mkdir $GITDIR/$APP && git init --bare $GITDIR/$APP > /dev/null)
+
+git-shell -c "$1 'gits/$APP'"
+
+#judge if app exist, if not clone, or how?
+if [ -d $APPDIR/$APP ]; then
+	cd $APPDIR/$APP
+	update_new=$(git pull)
+	cd  
+	if [ "$update_new" = "Already up-to-date." ]; then
+		if [ "$(etcdctl get /services/coreos1/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos1/$APP)
+			exit 0
+		elif [ "$(etcdctl get /services/coreos2/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos2/$APP)
+                        exit 0
+		elif [ "$(etcdctl get /services/coreos3/$APP)" ]; then
+			ipport_etcd=$(etcdctl get /services/coreos3/$APP)
+                        exit 0
+		else
+			sudo rm -r $APPDIR/$APP
+			mkdir $APPDIR/$APP
+			git clone $GITDIR/$APP $APPDIR/$APP
+		fi
+	else
+		sudo rm -r $APPDIR/$APP
+		mkdir $ADDDIR/$APP
+		git clone $GITDIR/$APP $APPDIR/$APP
+	fi
+else
+	mkdir $APPDIR/$APP
+	git clone $GITDIR/$APP $APPDIR/$APP
+fi
+
+if [ ! -f $APPDIR/$APP/Dockerfile ]; then
+	if [ -f $APPDIR/$APP/pom.xml ]; then
+		echo "maven app"
+		${NOPDIR}/maven_treat $APP
+	elif [ -f $APPDIR/$APP/mpi.xml ]; then
+		echo "mpi app"
+		${NOPDIR}/mpi_treat $APP
+	elif [ -f $APPDIR/$APP/profile ]; then
+		echo "profile app"
+		${NOPDIR}/profile_treat $APP
+	else
+		echo "some other kinds of projects"
+	fi
+else
+	echo "docker file app"
+	${NOPDIR}/dockerfile_treat $APP 1
+fi
+

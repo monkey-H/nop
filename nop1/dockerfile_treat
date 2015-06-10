@@ -1,0 +1,94 @@
+#!/bin/bash
+set -x
+
+GITDIR=/home/nop/gits
+APPDIR=/home/nop/apps
+WORKDIR=/etc/systemd/system
+APP=$1
+INSTANCES=$2
+DOCKER_OPTS=$3
+REGISTRY="docker.iwanna.xyz:5000/hmonkey"
+
+sudo touch ${WORKDIR}/build_${APP}.service
+BUILD="${WORKDIR}/build_${APP}.service"
+sudo chmod o+w $BUILD
+
+sudo touch ${WORKDIR}/${APP}@.service
+SERVICE="${WORKDIR}/${APP}@.service"
+sudo chmod o+w ${SERVICE}
+
+sudo touch ${WORKDIR}/discovery_${APP}@.service
+DISCOVERY="${WORKDIR}/discovery_${APP}@.service"
+sudo chmod o+w ${DISCOVERY}
+
+cat > $BUILD <<EOF
+[Unit]
+Description=${APP}_build
+Requires=docker.service
+After=docker.service
+
+[Service]
+TimeoutStartSec=900m
+ExecStartPre=/usr/bin/docker build -t $REGISTRY/${APP}_image $APPDIR/$APP
+ExecStart=/usr/bin/docker push $REGISTRY/${APP}_image
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+#run unit, pull image and run it
+
+cat > $SERVICE <<EOF
+[Unit]
+Description=${APP}
+Requires=docker.service
+After=docker.service
+
+[Service]
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker stop ${APP}%i
+ExecStartPre=-/usr/bin/docker rm $APP%i
+ExecStartPre=-/usr/bin/docker pull $REGISTRY/${APP}_image
+ExecStart=/usr/bin/docker run -P $DOCKER_OPTS --name $APP%i $REGISTRY/${APP}_image
+ExecStop=/usr/bin/docker stop $APP%i
+ExecStopPost=-/usr/bin/docker rm $APP%i
+
+EOF
+
+#discovery unit, by machineof find the run unit, and write ip and port to etcd
+
+cat > $DISCOVERY <<EOF
+[Unit]
+Description=${APP}_discovery
+BindsTo=${APP}@%i.service
+After=${APP}@%i.service
+
+[Service]
+ExecStart=/bin/sh -c "while true; do appport=\$(docker inspect --format='{{range \$p, \$conf := .NetworkSettings.Ports}}{{(index \$conf 0).HostPort}}{{end}}' $APP); etcdctl set /services/\"%H\"/$APP '{\"host\": \"%H\", \"port\": '\$appport'}' --ttl 60; sleep 30; done"
+ExecStop=/usr/bin/etcdctl rm /services/"%H"/$APP
+
+[X-Fleet]
+MachineOf=${APP}@%i.service
+EOF
+
+#buid and push
+
+cd $WORKDIR
+sudo systemctl enable build_${APP}
+sudo systemctl start build_${APP}
+
+#start app unit and discovery unit
+
+fleetctl destroy ${APP}@.service
+fleetctl destroy ${APP}_discovery@.service
+
+fleetctl submit $SERVICE $DISCOVERY
+
+# start instances of scales
+for ((i=1; i<=$INSTANCES; ++i))
+do
+	fleetctl destroy ${APP}@$i.service > /dev/null
+	fleetctl destroy discovery_${APP}@$i.service > /dev/null
+	fleetctl start ${APP}@$i.service > /dev/null
+	fleetctl start discovery_${APP}@$i.service > /dev/null
+done
