@@ -36,20 +36,21 @@ if [ -d $APPDIR/$APP ]; then
 		fi
 	else
 		sudo rm -r $APPDIR/$APP
-		sudo mkdir $ADDDIR/$APP
+		mkdir $ADDDIR/$APP
 		git clone $GITDIR/$APP $APPDIR/$APP
 	fi
 else
-	sudo mkdir $APPDIR/$APP
+	mkdir $APPDIR/$APP
 	git clone $GITDIR/$APP $APPDIR/$APP
 fi
 
 WORKDIR=/etc/systemd/system
 RIGISTRY="docker.iwanna.xyz:5000/hmonkey"
+INSTANCES=1
 
 #build unit, destroy app and app_discovery, then build image and push it
 
-touch $WORKDIR/BUILD_${APP}.service
+sudo touch $WORKDIR/BUILD_${APP}.service
 BUILD_SERVICE="$WORKDIR/BUILD_${APP}.service"
 sudo chmod o+w $BUILD_SERVICE
 
@@ -148,7 +149,7 @@ EOF
 
 #run unit, pull image and run it
 
-touch $WORKDIR/${APP}@.service
+sudo touch $WORKDIR/${APP}@.service
 SERVICE="$WORKDIR/${APP}@.service"
 sudo chmod o+w $SERVICE
 cat > $SERVICE <<EOF
